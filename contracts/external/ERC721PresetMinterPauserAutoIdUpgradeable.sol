@@ -49,7 +49,7 @@ contract ERC721PresetMinterPauserAutoIdUpgradeable is
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
-    CountersUpgradeable.Counter public _tokenIdTracker;
+    CountersUpgradeable.Counter public _warrantTokenIdTracker;
 
     /**
      * @dev Pauses all token transfers.
@@ -88,13 +88,13 @@ contract ERC721PresetMinterPauserAutoIdUpgradeable is
     function _beforeTokenTransfer(
         address from,
         address to,
-        uint256 tokenId
+        uint256 warrantTokenId
     )
         internal
         virtual
         override(ERC721PausableUpgradeable, ERC721EnumerableUpgradeable)
     {
-        super._beforeTokenTransfer(from, to, tokenId);
+        super._beforeTokenTransfer(from, to, warrantTokenId);
     }
 
     function supportsInterface(bytes4 interfaceId)

@@ -4,101 +4,76 @@ pragma solidity 0.8.4;
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
 import "./external/BaseUpgradeablePausable.sol";
-import "./InvestmentQueue.sol";
 import "./ProtocolConfig.sol";
 import "./BasePool.sol";
 import "./AggregatePool.sol";
 
 /**
-    An OpenGuild Income Share Pool (OGISP) is a pool where anyone can withdraw cryptocurrency from 
-    the pool and pay it back over time.
-
-    An OGISP is initialized with:
-      - a staking token address: the token denominating investments, withdrawals, and contributions
-      - a reward token address: the token the investor receives as a reward
-      - a maximum investment amount: the maximum amount that an investor can contribute at a time
-
-    Investor capital is deployed FIFO. To prevent one investor from taking up most of the proceeds, we
-    implement a max investment.
+ * @title OpenGuild's Individual Pool contract
+ * @notice An Individual is a pool where anyone can withdraw cryptocurrency from the pool and pay it back over time.
  */
 
 contract IndividualPool is BasePool {
     using SafeERC20Upgradeable for IERC20Upgradeable;
-    string public constant name = "IndividualPool";
+    // --- IAM Roles ------------------
+    bytes32 public constant RECIPIENT_ROLE = keccak256("RECIPIENT_ROLE");
 
     // --- Investor State -------------
-    // warrant token id => tokenTotalDividends, dividends that a token owner has ever accumulated
-    mapping(uint256 => uint256) public tokenTotalDividends;
+    // warrant token id => warrantTokenTotalDividends, dividends that a warrant token owner has ever accumulated
+    mapping(uint256 => uint256) public warrantTokenTotalDividends;
 
-    // warrant token id => tokenUnclaimedDividends, dividends that a token owner has not claimed yet
-    mapping(uint256 => uint256) public tokenUnclaimedDividends;
+    // warrant token id => warrantTokenUnclaimedDividends, dividends that a warrant token owner has not claimed yet
+    mapping(uint256 => uint256) public warrantTokenUnclaimedDividends;
 
-    // warrant token id => investorUndeployedAmount, amount of capital associated with warrant token id that is undeployed
-    mapping(uint256 => uint256) public undeployedAmountForWarrantToken;
+    // warrant token id => warrantTokenUndeployedAmount, amount of capital associated with warrant token id that is undeployed
+    mapping(uint256 => uint256) public warrantTokenUndeployedAmount;
 
-    // token id => investorDeployedAmount, how much of investor's capital that has been deployed
-    mapping(uint256 => uint256) public tokenDeployedAmount;
+    // Array of warrant token ids that have undeployed capital
+    uint256[] warrantTokenIdUndeployed;
+    // Index of the warrant token ID at the head of the list
+    uint256 warrantTokenIdUndeployedIndex;
+
+    // warrant token id => warrantTokenDeployedAmount, how much of an investor's capital that has been deployed
+    mapping(uint256 => uint256) public warrantTokenDeployedAmount;
 
     // Array of warrant token ids that have deployed capital
-    uint256[] tokenIdDeployed;
-
-    // pool address => poolDividends; how much in dividends this pool has allocated to other pools
-    // this individual pool would put its own address as a key as well
-    mapping(address => uint256) public poolDividends;
-
-    // pool address => poolDividends; how much in dividends this pool has allocated to other pools
-    // this individual pool would put its own address as a key as well
-    mapping(address => uint256) public poolDeployedAmount;
-
-    // Array of pools that have deployed capital
-    address[] deployedPools;
+    uint256[] warrantTokenIdDeployed;
     // -------------------------------
 
     // --- Recipient State -----------
-    // the maximum amount that recipients could take out at one time
-    // this is a mutable amount that fluctuates based on the pool manager's decision
-    // users will not be able to take out another investment until their previous balance's principal
-    // has been paid out.
+    // the maximum outstanding balance that recipients can have at one time set by the owner
     uint256 public recipientMaxBalance;
 
-    // the difference between balance and contributions
-    // for recipients at any given moment
+    // the recipient's outstanding balance (recipientMaxBalance - amount withdrawn + amount contributed)
     uint256 public recipientBalance;
     // -------------------------------
 
     // --- Pool state ----------------
-    // How much capital was deposited by investors but not withdrawn
-    InvestmentQueue private undeployedQueue;
-
-    // Maximum investment that an investor could make at a given time
-    uint256 public maxInvestment;
-
     // Total amount deployed to this pool
-    // We're relying on this instead of `getCumulativeUndeployedAmount` to save on gas fees
     uint256 public totalDeployed;
 
-    // --- IAM Roles ------------------
-    bytes32 public constant RECIPIENT_ROLE = keccak256("RECIPIENT_ROLE");
+    // Total amount undeployed in this pool
+    uint256 public totalUndeployed;
 
-    // -------------------------------
+    // Total returned in dividends to investors from this pool
+    uint256 public totalDividends;
 
-    // https://docs.openzeppelin.com/upgrades-plugins/1.x/writing-upgradeable
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() initializer {}
-
+    /**
+     * @notice Run only once, on initialization
+     * @param _owner The address that is assigned the "OWNER_ROLE" of this contract
+     * @param _config The address of the OpenGuild ProtocolConfig contract
+     * @param _poolToken The ERC20 token denominating investments, withdrawals and contributions
+     * @param _recipient The recipient of this individual pool
+     */
     function initialize(
         address _owner,
         ProtocolConfig _config,
         IERC20Upgradeable _poolToken,
-        uint256 _maxInvestment,
-        InvestmentQueue _undeployedQueue,
         address _recipient
     ) public initializer {
         require(_recipient != address(0), "Recipient cannot be the 0 address");
 
-        // initial variables
-        maxInvestment = _maxInvestment;
-        undeployedQueue = _undeployedQueue;
+        // initialize variables
 
         __BasePool__init(
             _owner,
@@ -113,60 +88,72 @@ contract IndividualPool is BasePool {
     /**
         Recipient functions
      */
+    /**
+     * @notice Withdraws capital and updates undeployed and deployed balances
+     * @notice Only callable by the recipient
+     * @param amount Amount to be withdrawn
+     */
     function withdraw(uint256 amount) external onlyRole(RECIPIENT_ROLE) {
         require(amount > 0, "You cannot withdraw 0 SLP");
 
         address sender = _msgSender();
-        uint256 withdrawableBalance = getMaxBalance();
+        uint256 withdrawableBalance = getWithdrawableBalance();
         require(
             amount <= withdrawableBalance,
             "You cannot withdraw more than your maximum balance"
         );
 
         require(
-            amount <= undeployedQueue.totalAmount(),
+            amount <= totalUndeployed,
             "Not enough undeployed capital to withdraw"
         );
 
         require(
             poolToken.balanceOf(address(this)) >= amount,
-            "Contract doesn't have enough in balance"
+            "Contract doesn't have enough pool tokens"
         );
 
         uint256 remainingAmount = amount;
-        while (!undeployedQueue.isEmpty() && remainingAmount > 0) {
-            Investment memory head = undeployedQueue.peek();
-            address issuingPool = warrantToken.getPool(head.tokenId);
-
-            if (tokenDeployedAmount[head.tokenId] == 0) {
-                tokenIdDeployed.push(head.tokenId);
+        uint256 index = warrantTokenIdUndeployedIndex;
+        while (index < warrantTokenIdUndeployed.length && remainingAmount > 0) {
+            if (warrantTokenIdUndeployed[index] == 0) {
+                index += 1;
+                continue;
             }
-            if (poolDeployedAmount[issuingPool] == 0) {
-                deployedPools.push(issuingPool);
+            uint256 warrantTokenId = warrantTokenIdUndeployed[index];
+            uint256 undeployedAmount = warrantTokenUndeployedAmount[
+                warrantTokenId
+            ];
+            if (warrantTokenDeployedAmount[warrantTokenId] == 0) {
+                warrantTokenIdDeployed.push(warrantTokenId);
             }
-            if (remainingAmount >= head.amount) {
-                undeployedQueue.dequeue();
-                remainingAmount -= head.amount;
-                undeployedAmountForWarrantToken[head.tokenId] -= head.amount;
-                tokenDeployedAmount[head.tokenId] += head.amount;
-                poolDeployedAmount[issuingPool] += head.amount;
+            if (remainingAmount >= undeployedAmount) {
+                index += 1;
+                remainingAmount -= undeployedAmount;
+                warrantTokenUndeployedAmount[
+                    warrantTokenId
+                ] -= undeployedAmount;
+                warrantTokenDeployedAmount[warrantTokenId] += undeployedAmount;
             } else {
-                undeployedQueue.decrementAmountAtHead(remainingAmount);
-                undeployedAmountForWarrantToken[
-                    head.tokenId
-                ] -= remainingAmount;
-                tokenDeployedAmount[head.tokenId] += remainingAmount;
-                poolDeployedAmount[issuingPool] += remainingAmount;
+                warrantTokenUndeployedAmount[warrantTokenId] -= remainingAmount;
+                warrantTokenDeployedAmount[warrantTokenId] += remainingAmount;
                 remainingAmount = 0;
             }
         }
 
+        warrantTokenIdUndeployedIndex = index;
+        totalUndeployed -= amount;
         totalDeployed += amount;
         recipientBalance += amount;
-        emit WithdrawInvestment(sender, amount);
+        emit Withdraw(sender, amount);
         poolToken.safeTransfer(sender, amount);
     }
 
+    /**
+     * @notice Contributes capital and disburses the dividends to warrant tokens accordingly
+     * @notice Only callable by the recipient
+     * @param amount Amount to be contributed
+     */
     function contribute(uint256 amount) external onlyRole(RECIPIENT_ROLE) {
         require(amount > 0, "You cannot contribute 0 SLP");
 
@@ -174,7 +161,7 @@ contract IndividualPool is BasePool {
 
         require(
             poolToken.balanceOf(_msgSender()) >= amount,
-            "You don't have enough tokens to contribute the amount passed in"
+            "You don't have enough pool tokens to contribute the amount passed in"
         );
         address sender = _msgSender();
 
@@ -184,140 +171,89 @@ contract IndividualPool is BasePool {
         );
         poolToken.safeTransferFrom(sender, address(this), amount);
 
-        for (uint256 i = 0; i < tokenIdDeployed.length; i++) {
-            uint256 tokenId = tokenIdDeployed[i];
-            address issuingPool = warrantToken.getPool(tokenId);
-            uint256 dividend = _getProRataForTokenId(netContribution, tokenId);
-            tokenUnclaimedDividends[tokenId] += dividend;
-            tokenTotalDividends[tokenId] += dividend;
-            poolDividends[issuingPool] += dividend;
-            if (
-                warrantToken.getPoolType(tokenId) ==
-                ProtocolConfig.PoolType.AggregatePool
-            ) {
-                AggregatePool aggregatePool = AggregatePool(issuingPool);
-                (uint256 poolManagerFee, ) = applyFee(
-                    _getProRataForTokenId(amount, tokenId),
-                    config.getPoolManagerTakeRate()
-                );
-                tokenUnclaimedDividends[tokenId] -= poolManagerFee;
-                tokenTotalDividends[tokenId] -= poolManagerFee;
-                poolDividends[issuingPool] -= poolManagerFee;
-                poolToken.safeTransfer(
-                    aggregatePool.getPoolManager(),
-                    poolManagerFee
-                );
-            }
+        for (uint256 i = 0; i < warrantTokenIdDeployed.length; i++) {
+            uint256 warrantTokenId = warrantTokenIdDeployed[i];
+            uint256 dividend = _getProRataForWarrantTokenId(
+                netContribution,
+                warrantTokenId
+            );
+            warrantTokenUnclaimedDividends[warrantTokenId] += dividend;
+            warrantTokenTotalDividends[warrantTokenId] += dividend;
         }
 
+        totalDividends += netContribution;
         if (amount > recipientBalance) {
             recipientBalance = 0;
         } else {
             recipientBalance -= amount;
         }
-        emit DepositContribution(sender, amount);
+        emit Contribute(sender, amount);
         poolToken.safeTransfer(config.getTreasuryAddress(), protocolFee);
     }
 
     /**
         Investor functions
      */
-    // Called when an investor invests into a pool
-    function invest(uint256 amount) external onlyRole(INVESTOR_ROLE) {
-        require(amount > 0, "You must invest more than 0");
 
-        address investor = _msgSender();
-        uint256 tokenId = warrantToken.mint(investor, address(this), poolType);
-        emit Invest(tokenId, investor, amount);
-        _invest(amount, tokenId, investor, address(this));
-    }
-
+    /**
+     * @notice Invest function called by an aggregate pool
+     * @notice Only callable by an aggregate pool
+     * @dev The warrant token is issued by the issuing aggregate pool, not this individual pool
+     * @param amount The amount to be invested
+     * @param warrantTokenId The aggregate pool warrant token that the investment is tied to
+     * @param investor The address of the investor from the aggregate pool
+     */
     function investFromAggregatePool(
         uint256 amount,
-        uint256 tokenId,
-        address investor,
-        address issuingPool
-    ) external onlyValidAggregatePoolOrAdmin {
-        _invest(amount, tokenId, investor, issuingPool);
-    }
-
-    function _invest(
-        uint256 amount,
-        uint256 tokenId,
-        address investor,
-        address issuingPool
-    ) private {
+        uint256 warrantTokenId,
+        address investor
+    ) external onlyValidAggregatePool {
         require(
             poolToken.balanceOf(investor) >= amount,
-            "You don't have enough tokens to invest"
+            "You don't have enough pool tokens to invest"
         );
-        require(
-            amount <= maxInvestment,
-            "Amount invested exceeds the maximum investment"
-        );
-        undeployedAmountForWarrantToken[tokenId] += amount;
-        undeployedQueue.enqueue(tokenId, amount, block.timestamp);
-        if (issuingPool == address(this)) {
-            poolToken.safeTransferFrom(investor, address(this), amount);
-        }
+
+        totalInvestedAmountForInvestor[investor] += amount;
+
+        warrantTokenIdUndeployed.push(warrantTokenId);
+        warrantTokenUndeployedAmount[warrantTokenId] += amount;
+        totalUndeployed += amount;
     }
 
-    modifier onlyValidAggregatePoolOrAdmin() {
-        require(
-            isAdmin() || config.isValidAggregatePool(msg.sender),
-            "Contract calling this function is not a valid aggregate pool"
-        );
-        _;
-    }
-
-    // Sends all claimable dividends to the claimer (msg.sender)
-    // Must be called by direct investors, or non-aggregate pool investors
-    function claim() external onlyRole(INVESTOR_ROLE) {
-        address claimer = _msgSender();
-        address issuingPool = address(this);
-
-        _claim(claimer, issuingPool, ProtocolConfig.PoolType.IndividualPool);
-    }
-
-    // Sends all claimable dividends to the claimer (msg.sender)
-    // Must be called by aggregate pools, which explicitly pass in the claimer
+    /**
+     * @notice Sends all claimable dividends to the claimer (msg.sender)
+     * @notice Must be called by an aggregate pool
+     * @param claimer The investor that made the aggregate pool investment
+     */
     function claimFromAggregatePool(address claimer)
         external
-        onlyValidAggregatePoolOrAdmin
+        onlyValidAggregatePool
     {
         address issuingPool = _msgSender();
 
-        _claim(claimer, issuingPool, ProtocolConfig.PoolType.AggregatePool);
-    }
-
-    // Claim all dividends available to the given warrant token IDs
-    function _claim(
-        address claimer,
-        address issuingPool,
-        ProtocolConfig.PoolType poolType
-    ) private {
-        uint256[] memory tokenIds = warrantToken.getTokensByOwnerAndPoolAddress(
-            claimer,
-            issuingPool,
-            poolType
-        );
+        uint256[] memory warrantTokenIds = warrantToken
+            .getWarrantTokensByOwnerAndPoolAddress(
+                claimer,
+                issuingPool,
+                ProtocolConfig.PoolType.AggregatePool
+            );
         require(
-            tokenIds.length > 0,
+            warrantTokenIds.length > 0,
             "Couldn't find any tokens for the given claimer and issuing pool"
         );
 
         uint256 claimAmount;
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            uint256 tokenId = tokenIds[i];
-            claimAmount += tokenTotalDividends[tokenId];
+        for (uint256 i = 0; i < warrantTokenIds.length; i++) {
+            uint256 warrantTokenId = warrantTokenIds[i];
+            claimAmount += warrantTokenUnclaimedDividends[warrantTokenId];
         }
         require(
             poolToken.balanceOf(address(this)) >= claimAmount,
             "Contract does not have enough to return"
         );
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            uint256 tokenId = tokenIds[i];
-            delete tokenUnclaimedDividends[tokenId];
+        for (uint256 i = 0; i < warrantTokenIds.length; i++) {
+            uint256 warrantTokenId = warrantTokenIds[i];
+            delete warrantTokenUnclaimedDividends[warrantTokenId];
         }
         if (claimAmount > 0) {
             emit Claim(claimer, claimAmount);
@@ -325,214 +261,244 @@ contract IndividualPool is BasePool {
         }
     }
 
-    function removeUndeployedCapital(uint256[] memory tokenIds)
+    modifier onlyValidAggregatePool() {
+        require(
+            config.isValidAggregatePool(msg.sender),
+            "Contract calling this function is not a valid aggregate pool"
+        );
+        _;
+    }
+
+    /**
+     * @notice Removes undeployed capital from warrant tokens
+     * @notice Only callable by the owner
+     * @dev Called in the case the recipient of this individual pool goes rogue
+     * @param warrantTokenIds The warrant tokens to remove undeployed capital from
+     */
+    function removeUndeployedCapital(uint256[] memory warrantTokenIds)
         external
-        onlyRole(INVESTOR_ROLE)
+        onlyRole(OWNER_ROLE)
     {
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            uint256 tokenId = tokenIds[i];
+        for (uint256 i = 0; i < warrantTokenIds.length; i++) {
+            uint256 warrantTokenId = warrantTokenIds[i];
+            address warrantTokenOwner = warrantToken.ownerOf(warrantTokenId);
+            uint256 amount = warrantTokenUndeployedAmount[warrantTokenId];
             require(
-                warrantToken.getPool(tokenId) == address(this),
-                "This warrant token was not minted from this pool"
+                amount > 0,
+                "There is no capital to undeploy from this warrant token"
             );
 
-            require(
-                warrantToken.ownerOf(tokenId) == _msgSender(),
-                "This token does not belong to the caller"
-            );
+            // uint256 warrantTokenPosition = undeployedQueue
+            //     .warrantTokenIdToPosition(warrantTokenId);
+            // require(
+            //     warrantTokenPosition >= undeployedQueue.first() &&
+            //         warrantTokenPosition <= undeployedQueue.last(),
+            //     "This warrant token is no longer in the undeployed queue"
+            // );
+            warrantTokenUndeployedAmount[warrantTokenId] = 0;
+            totalUndeployed -= amount;
+            // uint256 warrantTokenPosition = undeployedQueue.warrantTokenIdToPosition(
+            //     warrantTokenId
+            // );
+            // Investment memory removedNode = undeployedQueue.remove(
+            //     warrantTokenPosition
+            // );
 
-            uint256 tokenPosition = undeployedQueue.tokenIdToPosition(tokenId);
-            require(
-                tokenPosition >= undeployedQueue.first() &&
-                    tokenPosition <= undeployedQueue.last(),
-                "This token is no longer in the undeployed queue"
-            );
-
-            address remover = _msgSender();
-            address issuingPool = warrantToken.getPool(tokenId);
-            require(
-                issuingPool == address(this),
-                "This token was not issued by this pool"
-            );
-            if (tokenDeployedAmount[tokenId] == 0) {
-                warrantToken.burn(tokenId);
-            }
-            _removeUndeployedCapital(remover, tokenId);
+            emit RemoveUndeployedCapital(warrantTokenOwner, warrantTokenId);
+            poolToken.safeTransfer(warrantTokenOwner, amount);
         }
     }
 
-    function removeUndeployedFromAggregatePool(address remover, uint256 tokenId)
-        external
-        onlyValidAggregatePoolOrAdmin
-    {
-        // this returns the aggregate pool address
-        address issuingPool = warrantToken.getPool(tokenId);
-        require(
-            issuingPool == _msgSender(),
-            "This token was not issued by this pool"
-        );
-
-        _removeUndeployedCapital(remover, tokenId);
-    }
-
-    function _removeUndeployedCapital(address remover, uint256 tokenId)
-        private
-    {
-        undeployedAmountForWarrantToken[tokenId] = 0;
-        uint256 nftPosition = undeployedQueue.tokenIdToPosition(tokenId);
-        Investment memory removedNode = undeployedQueue.remove(nftPosition);
-        poolToken.safeTransfer(remover, removedNode.amount);
-    }
-
-    function getMaxBalance() public view returns (uint256) {
+    /// @return The current withdrawable balance
+    function getWithdrawableBalance() public view returns (uint256) {
         require(recipientMaxBalance > 0, "Recipient max balance not set");
-        require(
-            recipientBalance < recipientMaxBalance,
-            "Recipient has withdrawn max amount already"
-        );
+        if (recipientBalance > recipientMaxBalance) {
+            return 0;
+        }
 
         return recipientMaxBalance - recipientBalance;
     }
 
+    /**
+     * @notice Sets the new max balance
+     * @param amount The new max balance
+     */
     function setMaxBalance(uint256 amount) external onlyRole(OWNER_ROLE) {
         recipientMaxBalance = amount;
     }
 
-    function setRecipient(address newRecipientAddress)
-        external
-        onlyRole(OWNER_ROLE)
-    {
-        address recipientAddress = getRecipient();
+    /**
+     * @notice Replace the current recipient with a new recipient
+     * @notice Only callable by the owner
+     * @dev There can only be one recipient at a time
+     * @param newRecipient The address of the new recipient
+     */
+    function setRecipient(address newRecipient) external onlyRole(OWNER_ROLE) {
+        address recipient = getRecipient();
 
-        revokeRole(RECIPIENT_ROLE, recipientAddress);
-        grantRole(RECIPIENT_ROLE, newRecipientAddress);
+        revokeRole(RECIPIENT_ROLE, recipient);
+        grantRole(RECIPIENT_ROLE, newRecipient);
         require(
             getRoleMemberCount(RECIPIENT_ROLE) == 1,
             "Only one recipient could be set at a time!"
         );
     }
 
+    /// @return Current recipient address
     function getRecipient() public view returns (address) {
         return getRoleMember(RECIPIENT_ROLE, 0);
     }
 
-    // Returns the sum of all dividends returned by this individual pool to all recipients,
-    // both aggregate pools who have this pool in their allocation and investors who invest
-    // directly into this pool
+    /**
+     * @return The sum of all dividends returned by this individual pool to all recipients,
+     * both aggregate pools who have this pool in their allocation and investors who invest
+     * directly into this pool
+     */
     function getCumulativeDividends() public view override returns (uint256) {
-        uint256 totalDividends = 0;
-
-        for (uint256 i = 0; i < deployedPools.length; i++) {
-            totalDividends += poolDividends[deployedPools[i]];
-        }
         return totalDividends;
     }
 
-    // Returns cumulative deployed amount from all recipients, both aggregate pools who have
-    // this pool in their allocation and investors who invest directly into this pool
+    /**
+     * @return The cumulative deployed amount from all recipients, both aggregate pools who have
+     * this pool in their allocation and investors who invest directly into this pool.
+     */
     function getCumulativeDeployedAmount()
         public
         view
         override
         returns (uint256)
     {
-        uint256 total = 0;
-        for (uint256 i = 0; i < deployedPools.length; i++) {
-            total += poolDeployedAmount[deployedPools[i]];
-        }
-
-        assert(total == totalDeployed);
-        return total;
+        return totalDeployed;
     }
 
-    // Returns undeployed balances for a pool address. Passing in the current pool's address
-    // should return only the dividends returned to investors who directly invested into this
-    // individual pool
-    function getCumulativeDividendsForPool(address pool)
-        public
-        view
-        returns (uint256)
-    {
-        return poolDividends[pool];
-    }
-
-    // Returns deployed amount for a pool address. Passing in the current pool's address
-    // should return only the deployed amount returned to investors who directly invested into this
-    // individual pool
-    function getCumulativeDeployedAmountForPool(address pool)
-        public
-        view
-        returns (uint256)
-    {
-        return poolDeployedAmount[pool];
-    }
-
-    // Returns the returns for a token
-    function getReturnsForToken(uint256 tokenId)
+    /**
+     * @return Percent returns for a warrant token
+     * @param warrantTokenId The warrant token id' returns that this function will return
+     */
+    function getWarrantTokenReturns(uint256 warrantTokenId)
         external
         view
         override
         returns (uint256)
     {
-        if (tokenDeployedAmount[tokenId] == 0) {
+        if (warrantTokenDeployedAmount[warrantTokenId] == 0) {
             return 0;
         }
         return
-            (100 * PERCENTAGE_DECIMAL * tokenTotalDividends[tokenId]) /
-            tokenDeployedAmount[tokenId];
+            (100 *
+                PERCENTAGE_DECIMAL *
+                warrantTokenTotalDividends[warrantTokenId]) /
+            warrantTokenDeployedAmount[warrantTokenId];
     }
 
-    function getTokenTotalDividends(uint256 tokenId)
+    /**
+     * @return The warrant token's total dividends in this individual pool
+     * @notice Dividends are weighted pro-rata by an investor's contribution
+     * @param warrantTokenId The warrant token id's total dividends that this function returns
+     */
+    function getWarrantTokenTotalDividends(uint256 warrantTokenId)
         external
         view
         override
         returns (uint256)
     {
-        return tokenTotalDividends[tokenId];
+        return warrantTokenTotalDividends[warrantTokenId];
     }
 
-    function getTokenUnclaimedDividends(uint256 tokenId)
+    /**
+     * @return The warrant token's total unclaimed dividends in this individual pool
+     * @notice Dividends are weighted pro-rata by an investor's contribution
+     * @param warrantTokenId The warrant token id's total unclaimed dividends that this function returns
+     */
+    function getWarrantTokenUnclaimedDividends(uint256 warrantTokenId)
         external
         view
         override
         returns (uint256)
     {
-        return tokenUnclaimedDividends[tokenId];
+        return warrantTokenUnclaimedDividends[warrantTokenId];
     }
 
-    function getTokenDeployedAmount(uint256 tokenId)
+    /**
+     * @return The warrant token's cumulative deployed amount in this individualPool
+     * @param warrantTokenId The warrant token id's total unclaimed dividends that this function returns
+     */
+    function getWarrantTokenDeployedAmount(uint256 warrantTokenId)
         external
         view
         override
         returns (uint256)
     {
-        return tokenDeployedAmount[tokenId];
+        return warrantTokenDeployedAmount[warrantTokenId];
     }
 
-    function getUndeployedAmountForWarrantToken(uint256 tokenId)
+    /**
+     * @return The warrant token's cumulative undeployed amount in this individual pool
+     * @param warrantTokenId The warrant token id's total undeployed amount that this function returns
+     */
+    function getWarrantTokenUndeployedAmount(uint256 warrantTokenId)
         external
         view
         override
         returns (uint256)
     {
-        return undeployedAmountForWarrantToken[tokenId];
+        return warrantTokenUndeployedAmount[warrantTokenId];
     }
 
+    /**
+     * @return The undeployed warrant token at the given index
+     * @param warrantTokenIdIndex The warrant token id's total undeployed amount that this function returns
+     */
+    function getWarrantTokenIdUndeployed(uint256 warrantTokenIdIndex)
+        external
+        view
+        returns (uint256)
+    {
+        return warrantTokenIdUndeployed[warrantTokenIdIndex];
+    }
+
+    /**
+     * @return The warrantTokenIdUndeployedIndex
+     */
+    function getWarrantTokenIdUndeployedIndex()
+        external
+        view
+        returns (uint256)
+    {
+        return warrantTokenIdUndeployedIndex;
+    }
+
+    /// @return Total undeployed amount in this individual pool
     function getTotalUndeployedAmount()
         external
         view
         override
         returns (uint256)
     {
-        return undeployedQueue.totalAmount();
+        return totalUndeployed;
     }
 
-    // Calculates an amount proportional to the deployed amount for a token and total deployed for a pool
-    function _getProRataForTokenId(uint256 amount, uint256 tokenId)
-        internal
-        view
-        returns (uint256)
-    {
-        return (amount * tokenDeployedAmount[tokenId]) / totalDeployed;
+    /// @return Amount proportional to the deployed amount for a warrant token and total deployed in this pool
+    function _getProRataForWarrantTokenId(
+        uint256 amount,
+        uint256 warrantTokenId
+    ) internal view returns (uint256) {
+        return
+            (amount * warrantTokenDeployedAmount[warrantTokenId]) /
+            totalDeployed;
+    }
+
+    function getFirstUndeployedWarrantToken() public view returns (uint256) {
+        if (warrantTokenIdUndeployedIndex >= warrantTokenIdUndeployed.length) {
+            return 0;
+        }
+        return warrantTokenIdUndeployed[warrantTokenIdUndeployedIndex];
+    }
+
+    function getLastUndeployedWarrantToken() public view returns (uint256) {
+        if (warrantTokenIdUndeployed.length == 0) {
+            return 0;
+        }
+        return warrantTokenIdUndeployed[warrantTokenIdUndeployed.length - 1];
     }
 }

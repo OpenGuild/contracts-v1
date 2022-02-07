@@ -6,11 +6,13 @@ import "./external/BaseUpgradeablePausable.sol";
 import "./WarrantToken.sol";
 import "./ProtocolConfig.sol";
 
-abstract contract BasePool is BaseUpgradeablePausable {
-    // --- IAM roles ------------------
-    bytes32 public constant INVESTOR_ROLE = keccak256("INVESTOR_ROLE");
+/**
+ * @title OpenGuild's Base Pool contract
+ * @notice This is the BasePool contract that the IndividualPool and AggregatePool contracts inherit from
+ */
 
-    // Precision of allocation percentages- (1 percent == PERCENTAGE_DECIMAL)
+abstract contract BasePool is BaseUpgradeablePausable {
+    // Precision of allocation percentages (1 percent == PERCENTAGE_DECIMAL)
     uint256 public constant PERCENTAGE_DECIMAL = 10**16;
 
     // ERC20 token that the pool is denominated in
@@ -19,16 +21,29 @@ abstract contract BasePool is BaseUpgradeablePausable {
     // ERC721 token that grants the owner the right to withdraw dividends from the pool
     WarrantToken public warrantToken;
 
+    // investor address => totalInvestedAmountForInvestor, how much an investor has invested into the pool so far
+    mapping(address => uint256) public totalInvestedAmountForInvestor;
+
     ProtocolConfig internal config;
 
     ProtocolConfig.PoolType public poolType;
 
-    event WithdrawInvestment(address indexed from, uint256 amount);
-    event DepositContribution(address indexed from, uint256 amount);
-
-    event Invest(uint256 tokenId, address indexed from, uint256 amount);
+    event Invest(uint256 warrantTokenId, address indexed from, uint256 amount);
+    event Withdraw(address indexed from, uint256 amount);
     event Claim(address indexed from, uint256 amount);
+    event Contribute(address indexed from, uint256 amount);
+    event RemoveUndeployedCapital(
+        address indexed remover,
+        uint256 warrantTokenId
+    );
 
+    /**
+     * @notice Run only once, on initialization
+     * @param _owner The address of who should have the "OWNER_ROLE" of this contract
+     * @param _config The address of the OpenGuild ProtocolConfig contract
+     * @param _poolToken The ERC20 token denominating investments, withdrawals and contributions
+     * @param _poolType The pool type of the BasePool
+     */
     function __BasePool__init(
         address _owner,
         ProtocolConfig _config,
@@ -48,25 +63,13 @@ abstract contract BasePool is BaseUpgradeablePausable {
         warrantToken = WarrantToken(existingWarrantTokenAddress);
 
         __BaseUpgradeablePausable__init(_owner);
-
-        _setRoleAdmin(INVESTOR_ROLE, OWNER_ROLE);
     }
 
-    function addInvestor(address investorAddress)
-        external
-        onlyRole(OWNER_ROLE)
-    {
-        grantRole(INVESTOR_ROLE, investorAddress);
-    }
-
-    function removeInvestor(address investorAddress)
-        external
-        onlyRole(OWNER_ROLE)
-    {
-        revokeRole(INVESTOR_ROLE, investorAddress);
-    }
-
-    // Given an amount, returns a tuple of OpenGuild's take + remainder
+    /**
+     * @return Tuple of OpenGuild's take + remainder
+     * @param amount Amount to subtract the fee from
+     * @param takeRate Rate to calculate the fee
+     */
     function applyFee(uint256 amount, uint256 takeRate)
         public
         view
@@ -79,50 +82,65 @@ abstract contract BasePool is BaseUpgradeablePausable {
         return (fee, remainder);
     }
 
-    // Returns the sum of all dividends returned to this pool
+    /// @return The sum of all dividends returned to this pool
     function getCumulativeDividends() public view virtual returns (uint256) {}
 
-    // Returns the returns for a token
-    function getReturnsForToken(uint256 tokenId)
+    /**
+     * @return The warrant token's returns
+     * @param warrantTokenId The warrant token id's returns this function returns
+     */
+    function getWarrantTokenReturns(uint256 warrantTokenId)
         external
         view
         virtual
         returns (uint256)
     {}
 
-    // Returns the returns for a token
-    function getTokenTotalDividends(uint256 tokenId)
+    /**
+     * @return The warrant token's total dividends
+     * @param warrantTokenId The warrant token id's total dividends that this function returns
+     */
+    function getWarrantTokenTotalDividends(uint256 warrantTokenId)
         external
         view
         virtual
         returns (uint256)
     {}
 
-    // Returns the returns for a token
-    function getTokenUnclaimedDividends(uint256 tokenId)
+    /**
+     * @return The warrant token's total unclaimed dividends
+     * @param warrantTokenId The warrant token id's total unclaimed dividends that this function returns
+     */
+    function getWarrantTokenUnclaimedDividends(uint256 warrantTokenId)
         external
         view
         virtual
         returns (uint256)
     {}
 
-    // Returns the deployed amount for a token
-    function getTokenDeployedAmount(uint256 tokenId)
+    /**
+     * @return The warrant token's total deployed amount
+     * @param warrantTokenId The warrant token id's total deployed amount that this function returns
+     */
+    function getWarrantTokenDeployedAmount(uint256 warrantTokenId)
         external
         view
         virtual
         returns (uint256)
     {}
 
-    // Returns the undeployed amount for a token
-    function getUndeployedAmountForWarrantToken(uint256 tokenId)
+    /**
+     * @return The warrant token's total undeployed amount
+     * @param warrantTokenId The warrant token id's total undeployed amount that this function returns
+     */
+    function getWarrantTokenUndeployedAmount(uint256 warrantTokenId)
         external
         view
         virtual
         returns (uint256)
     {}
 
-    // Returns the total undeployed amount for a pool
+    /// @return Total undeployed amount in the pool
     function getTotalUndeployedAmount()
         external
         view
@@ -130,7 +148,7 @@ abstract contract BasePool is BaseUpgradeablePausable {
         returns (uint256)
     {}
 
-    // Returns the sum of all investments deployed in this pool
+    /// @return Total deployed amount in the pool
     function getCumulativeDeployedAmount()
         public
         view
@@ -138,8 +156,7 @@ abstract contract BasePool is BaseUpgradeablePausable {
         returns (uint256)
     {}
 
-    // Returns the cumulative cash on cash returns of the current pool, to the same
-    // digits of precision as the poolToken
+    /// @return Cumulative cash on cash returns of the current pool, to the same digits of precision as the poolToken
     function getCumulativeReturns() public view returns (uint256) {
         uint256 cumulativeDeployedAmount = getCumulativeDeployedAmount();
         if (cumulativeDeployedAmount == 0) {
