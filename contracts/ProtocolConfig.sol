@@ -3,7 +3,6 @@ pragma solidity 0.8.4;
 
 import "./external/BaseUpgradeablePausable.sol";
 import "./GovernanceToken.sol";
-import "./WarrantToken.sol";
 
 contract ProtocolConfig is BaseUpgradeablePausable {
     // OpenGuild's take rate is 5%
@@ -25,7 +24,6 @@ contract ProtocolConfig is BaseUpgradeablePausable {
     enum Addresses {
         GovernanceToken,
         ProtocolConfig,
-        WarrantToken,
         Treasury
     }
 
@@ -41,7 +39,10 @@ contract ProtocolConfig is BaseUpgradeablePausable {
      * @param _owner The address of who should have the "OWNER_ROLE" of this contract
      * @param _treasury The address of the OpenGuild treasury
      */
-    function initialize(address _owner, address _treasury) public initializer {
+    function initialize(address _owner, address _treasury)
+        external
+        initializer
+    {
         require(_owner != address(0), "Owner address cannot be empty");
         require(_treasury != address(0), "Treasury address cannot be empty");
 
@@ -71,19 +72,6 @@ contract ProtocolConfig is BaseUpgradeablePausable {
     }
 
     /**
-     * @notice Sets the warrant token address in the addresses mapping
-     * @notice Only callable by the admin
-     * @param newWarrantTokenAddress The warrant token address
-     */
-    function setWarrantTokenAddress(address newWarrantTokenAddress)
-        external
-        onlyAdmin
-    {
-        uint256 key = uint256(Addresses.WarrantToken);
-        addresses[key] = newWarrantTokenAddress;
-    }
-
-    /**
      * @notice Sets the treasury address in the addresses mapping
      * @notice Only callable by the admin
      * @param newTreasuryAddress The treasury address
@@ -100,11 +88,6 @@ contract ProtocolConfig is BaseUpgradeablePausable {
         returns (GovernanceToken)
     {
         return GovernanceToken(getAddress(uint256(Addresses.GovernanceToken)));
-    }
-
-    /// @return The protocol's warrant token address
-    function getWarrantTokenAddress() public view returns (address) {
-        return getAddress(uint256(Addresses.WarrantToken));
     }
 
     /// @return The OpenGuild treasury address

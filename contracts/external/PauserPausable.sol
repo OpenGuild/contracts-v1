@@ -34,7 +34,7 @@ contract PauserPausable is
      * - the caller must have the PAUSER_ROLE.
      */
 
-    function pause() public onlyPauserRole {
+    function pause() external onlyPauserRole {
         _pause();
     }
 
@@ -47,7 +47,7 @@ contract PauserPausable is
      *
      * - the caller must have the Pauser role
      */
-    function unpause() public onlyPauserRole {
+    function unpause() external onlyPauserRole {
         _unpause();
     }
 

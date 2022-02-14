@@ -3,18 +3,20 @@ pragma solidity 0.8.4;
 
 import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
-import "./WarrantToken.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+
 import "./ProtocolConfig.sol";
 import "./BasePool.sol";
 import "./IndividualPool.sol";
 
 /**
-  * @title OpenGuild's Aggregate Pool contract
+  * @title  OpenGuild's Aggregate Pool contract
   * @notice An AggregatePool is a pool where investors can invest cryptocurrency into multiple IndividualPools and 
-    claim dividends from each.
+            claim dividends from each. Whenever users invest into an aggregate pool, they are minted shares (ERC20 tokens).
+  * @dev    1 share = 1 poolToken (ie 1 USDT). Therefore, do not use the aggregate pool's decimal() function in 
+            front-end views- use poolToken.decimal() instead.
   */
-
-contract AggregatePool is BasePool {
+contract AggregatePool is ERC20Upgradeable, BasePool {
     using SafeERC20Upgradeable for IERC20Upgradeable;
 
     // --- IAM roles ------------------
@@ -27,10 +29,6 @@ contract AggregatePool is BasePool {
 
     // array of indvidual pool addresses that are currently associated with this aggregate pool
     address[] public currentIndividualPools;
-
-    // array of all indvidual pool addresses that have been associated with this aggregate pool
-    /// @dev This array is accessed when investors need to access information and attempt to claim from individual pools no longer in currentIndividualPools
-    address[] public allIndividualPools;
 
     // maximum difference allowed between pool percentage allocations and 100 (margin of error in percentage terms: ALLOCATION_MARGIN_OF_ERROR/PERCENTAGE_DECIMAL)
     uint256 public constant ALLOCATION_MARGIN_OF_ERROR = 10**4;
@@ -61,88 +59,35 @@ contract AggregatePool is BasePool {
         uint256[] memory _currentPercentages,
         uint256 _poolInvestmentLimit,
         uint256 _investorInvestmentLimit
-    ) public initializer {
+    ) external initializer {
+        require(
+            _currentIndividualPools.length != 0,
+            "There must be at least one individual pool associated"
+        );
         require(
             _currentIndividualPools.length == _currentPercentages.length,
             "The number of pools and percentages are different"
-        );
-
-        // initialize variables
-        poolInvestmentLimit = _poolInvestmentLimit;
-        investorInvestmentLimit = _investorInvestmentLimit;
-        currentIndividualPools = _currentIndividualPools;
-
-        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
-            address pool = currentIndividualPools[i];
-            individualPoolAllocations[pool] = _currentPercentages[i];
-        }
-
-        __BasePool__init(
-            _owner,
-            _config,
-            _poolToken,
-            ProtocolConfig.PoolType.AggregatePool
-        );
-        _setRoleAdmin(INVESTOR_ROLE, OWNER_ROLE);
-        _setRoleAdmin(POOL_MANAGER_ROLE, OWNER_ROLE);
-        _setupRole(POOL_MANAGER_ROLE, _owner);
-    }
-
-    /**
-     * @notice Returns the absolute difference between a and b
-     * @param a Number to subtract
-     * @param b Number to subtract
-     */
-    function _absoluteDifference(uint256 a, uint256 b)
-        private
-        pure
-        returns (uint256)
-    {
-        if (a > b) {
-            return a - b;
-        }
-        return b - a;
-    }
-
-    /**
-     * @notice Sets the percentage of investments that should go into each pool
-     * @notice Only callable by pool manager
-     * @param newIndividualPools New individual pool addresses to add to the aggregate pool's allocations
-     * @param newPercentages Corresponding allocation percentages to the individual pool addresses
-     */
-    function setPoolAllocations(
-        address[] memory newIndividualPools,
-        uint256[] memory newPercentages
-    ) external onlyRole(POOL_MANAGER_ROLE) {
-        require(
-            newIndividualPools.length > 0,
-            "Individual pool address length cannot be 0"
-        );
-        require(
-            newIndividualPools.length == newPercentages.length,
-            "The number of pools and newPercentages are different"
         );
 
         bool areAllValidIndividualPools = true;
         bool allUseSamePoolToken = true;
         uint256 sum = 0;
 
-        for (uint256 i = 0; i < newIndividualPools.length; i++) {
-            address poolAddress = newIndividualPools[i];
-            if (!config.isValidIndividualPool(poolAddress)) {
+        for (uint256 i = 0; i < _currentIndividualPools.length; i++) {
+            address poolAddress = _currentIndividualPools[i];
+            IndividualPool pool = IndividualPool(poolAddress);
+
+            if (!_config.isValidIndividualPool(poolAddress)) {
                 areAllValidIndividualPools = false;
                 break;
             }
 
-            IndividualPool pool = IndividualPool(poolAddress);
-
-            if (address(pool.poolToken()) != address(poolToken)) {
+            if (address(pool.poolToken()) != address(_poolToken)) {
                 allUseSamePoolToken = false;
                 break;
             }
-            uint256 percentage = newPercentages[i];
-            // This check makes sure a pool is not double added to allIndividualPools
-            require(percentage > 0, "You cannot set a pool's allocation to 0");
+
+            uint256 percentage = _currentPercentages[i];
             sum += percentage;
         }
 
@@ -172,13 +117,86 @@ contract AggregatePool is BasePool {
             "Pool allocations must add up to 100"
         );
 
-        // Set currentIndividualPools to parameter;
-        currentIndividualPools = newIndividualPools;
-        for (uint256 i = 0; i < newIndividualPools.length; i++) {
-            address poolAddress = newIndividualPools[i];
-            if (individualPoolAllocations[poolAddress] == 0) {
-                allIndividualPools.push(poolAddress);
-            }
+        // initialize variables
+        poolInvestmentLimit = _poolInvestmentLimit;
+        investorInvestmentLimit = _investorInvestmentLimit;
+        currentIndividualPools = _currentIndividualPools;
+
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address pool = currentIndividualPools[i];
+            individualPoolAllocations[pool] = _currentPercentages[i];
+        }
+
+        individualPoolAllocations[currentIndividualPools[0]] += sumDifference;
+
+        __BasePool__init(
+            _owner,
+            _config,
+            _poolToken,
+            ProtocolConfig.PoolType.AggregatePool
+        );
+        _setRoleAdmin(INVESTOR_ROLE, OWNER_ROLE);
+        _setRoleAdmin(POOL_MANAGER_ROLE, OWNER_ROLE);
+        _setupRole(POOL_MANAGER_ROLE, _owner);
+
+        __ERC20_init_unchained("OpenGuild v1 Aggregate Pool", "ogV1AggPool");
+    }
+
+    /**
+     * @notice Returns the absolute difference between a and b
+     * @param a Number to subtract
+     * @param b Number to subtract
+     */
+    function _absoluteDifference(uint256 a, uint256 b)
+        private
+        pure
+        returns (uint256)
+    {
+        if (a > b) {
+            return a - b;
+        }
+        return b - a;
+    }
+
+    /**
+     * @notice Sets the percentage of investments that should go into each pool
+     * @notice Only callable by pool manager
+     * @param newPercentages Corresponding allocation percentages to the individual pool addresses
+     */
+    function setPoolAllocations(uint256[] memory newPercentages)
+        external
+        onlyRole(POOL_MANAGER_ROLE)
+    {
+        require(
+            newPercentages.length == currentIndividualPools.length,
+            "The number of new percentages and current individual pools are different"
+        );
+
+        uint256 sum = 0;
+
+        for (uint256 i = 0; i < newPercentages.length; i++) {
+            uint256 percentage = newPercentages[i];
+            sum += percentage;
+        }
+
+        uint256 sumDifference = _absoluteDifference(
+            100 * PERCENTAGE_DECIMAL,
+            sum
+        );
+
+        // Round up the sum if the calculated sum is off by less than
+        // ALLOCATION_MARGIN_OF_ERROR
+        if (sumDifference <= ALLOCATION_MARGIN_OF_ERROR) {
+            sum += sumDifference;
+        }
+
+        require(
+            sum == 100 * PERCENTAGE_DECIMAL,
+            "Pool allocations must add up to 100"
+        );
+
+        for (uint256 i = 0; i < newPercentages.length; i++) {
+            address poolAddress = currentIndividualPools[i];
             uint256 percentage = newPercentages[i];
             individualPoolAllocations[poolAddress] = percentage;
         }
@@ -195,42 +213,42 @@ contract AggregatePool is BasePool {
      * @notice Only callable by an investor
      * @param amount Amount to be invested
      */
-    function invest(uint256 amount) external onlyRole(INVESTOR_ROLE) {
+    function invest(uint256 amount)
+        external
+        onlyRole(INVESTOR_ROLE)
+        whenNotPaused
+    {
         require(
             currentIndividualPools.length > 0,
             "There are no individual pools associated with this pool"
         );
 
         require(amount > 0, "You must invest more than 0");
-
+        address investor = _msgSender();
         require(
-            poolToken.balanceOf(_msgSender()) >= amount,
+            poolToken.balanceOf(investor) >= amount,
             "You don't have enough pool tokens to invest"
         );
 
+        // the total minted amount of shares is guaranteed to be less than the pool
+        // investment limit because of this check
         require(
-            amount +
-                getCumulativeDeployedAmount() +
-                getTotalUndeployedAmount() <=
+            amount + getTotalDeployedAmount() + getTotalUndeployedAmount() <=
                 poolInvestmentLimit,
             "This pool has already reached its max investment"
         );
 
         require(
-            amount + totalInvestedAmountForInvestor[_msgSender()] <=
+            amount + totalInvestedAmountForInvestor[investor] <=
                 investorInvestmentLimit,
             "This investor has already invested the max amount for this pool"
         );
 
-        totalInvestedAmountForInvestor[_msgSender()] += amount;
+        totalInvestedAmountForInvestor[investor] += amount;
 
-        uint256 warrantTokenId = warrantToken.mint(
-            _msgSender(),
-            address(this),
-            poolType
-        );
+        // mint fungible tokens from this contract to the investor
+        _mint(investor, amount);
 
-        address investor = _msgSender();
         poolToken.safeTransferFrom(investor, address(this), amount);
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
             address poolAddress = currentIndividualPools[i];
@@ -238,61 +256,31 @@ contract AggregatePool is BasePool {
                 poolAddress,
                 amount
             );
-            poolToken.transfer(poolAddress, poolAmount);
             IndividualPool individualPool = IndividualPool(poolAddress);
-            individualPool.investFromAggregatePool(
-                poolAmount,
-                warrantTokenId,
-                investor
-            );
+            individualPool.investFromAggregatePool(poolAmount, investor);
+            poolToken.safeTransfer(poolAddress, poolAmount);
         }
-        emit Invest(warrantTokenId, investor, amount);
+        emit Invest(investor, amount);
     }
 
     /**
-     * @notice Claim all unclaimed dividends from allIndividualPools
+     * @notice Claim all unclaimed dividends from currentIndividualPools
      * @notice Only callable by an investor
      */
-    function claim() external onlyRole(INVESTOR_ROLE) {
-        require(
-            allIndividualPools.length > 0,
-            "There are no individual pools associated with this aggregate pool"
-        );
-
+    function claim() external onlyRole(INVESTOR_ROLE) whenNotPaused {
         address claimer = _msgSender();
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
+        uint256 claimerShares = balanceOf(claimer);
+
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
             IndividualPool individualPool = IndividualPool(poolAddress);
 
-            individualPool.claimFromAggregatePool(claimer);
+            individualPool.claimFromAggregatePool(
+                claimer,
+                claimerShares,
+                totalSupply()
+            );
         }
-    }
-
-    /// @return Sum of all dividends returned to this aggregate pool
-    function getCumulativeDividends() public view override returns (uint256) {
-        uint256 totalReturned;
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            totalReturned += individualPool.getCumulativeDividends();
-        }
-        return totalReturned;
-    }
-
-    /// @return Sum of all investments deployed aggregated across allIndividualPools
-    function getCumulativeDeployedAmount()
-        public
-        view
-        override
-        returns (uint256)
-    {
-        uint256 totalDeployed;
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            totalDeployed += individualPool.getCumulativeDeployedAmount();
-        }
-        return totalDeployed;
     }
 
     /**
@@ -395,125 +383,34 @@ contract AggregatePool is BasePool {
         return getRoleMember(POOL_MANAGER_ROLE, 0);
     }
 
-    /**
-     * @return The warrant token's cash on cash return aggregated across allIndividualPools
-     * @param warrantTokenId The warrant token id's return that this function returns
-     */
-    function getWarrantTokenReturns(uint256 warrantTokenId)
-        external
-        view
-        override
-        returns (uint256)
-    {
-        uint256 dividends;
-        uint256 deployedAmount;
-
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            dividends += individualPool.getWarrantTokenTotalDividends(
-                warrantTokenId
-            );
-            deployedAmount += individualPool.getWarrantTokenDeployedAmount(
-                warrantTokenId
-            );
-        }
-
-        if (deployedAmount == 0) {
-            return 0;
-        }
-
-        return (100 * PERCENTAGE_DECIMAL * dividends) / deployedAmount;
-    }
-
-    /**
-     * @return The warrant token's total dividends aggregated across allIndividualPools
-     * @notice Dividends are weighted pro-rata by an investor's contribution
-     * @param warrantTokenId The warrant token id's total dividends that this function returns
-     */
-    function getWarrantTokenTotalDividends(uint256 warrantTokenId)
-        external
-        view
-        override
-        returns (uint256)
-    {
-        uint256 warrantTokenTotalDividends;
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            warrantTokenTotalDividends += individualPool
-                .getWarrantTokenTotalDividends(warrantTokenId);
-        }
-        return warrantTokenTotalDividends;
-    }
-
-    /**
-     * @return The warrant token's total unclaimed dividends aggregated across allIndividualPools
-     * @notice Dividends are weighted pro-rata by an investor's contribution
-     * @param warrantTokenId The warrant token id's total unclaimed dividends that this function returns
-     */
-    function getWarrantTokenUnclaimedDividends(uint256 warrantTokenId)
-        external
-        view
-        override
-        returns (uint256)
-    {
-        uint256 warrantTokenUnclaimedDividends;
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            warrantTokenUnclaimedDividends += individualPool
-                .getWarrantTokenUnclaimedDividends(warrantTokenId);
-        }
-        return warrantTokenUnclaimedDividends;
-    }
-
-    /**
-     * @return The warrant token's cumulative deployed amount aggregated across allIndividualPools
-     * @param warrantTokenId The warrant token id's total unclaimed dividends that this function returns
-     */
-    function getWarrantTokenDeployedAmount(uint256 warrantTokenId)
-        external
-        view
-        override
-        returns (uint256)
-    {
-        uint256 warrantTokenTotalDeployed;
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            warrantTokenTotalDeployed += individualPool
-                .getWarrantTokenDeployedAmount(warrantTokenId);
-        }
-        return warrantTokenTotalDeployed;
-    }
-
-    /**
-     * @return The warrant token's cumulative undeployed amount aggregated across allIndividualPools
-     * @param warrantTokenId The warrant token id's total undeployed amount that this function returns
-     */
-    function getWarrantTokenUndeployedAmount(uint256 warrantTokenId)
-        external
-        view
-        override
-        returns (uint256)
-    {
-        uint256 warrantTokenTotalUndeployed;
-        for (uint256 i = 0; i < allIndividualPools.length; i++) {
-            address poolAddress = allIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            warrantTokenTotalUndeployed += individualPool
-                .getWarrantTokenUndeployedAmount(warrantTokenId);
-        }
-        return warrantTokenTotalUndeployed;
-    }
-
     /// @return Length of currentIndividualPools
     function getCurrentIndividualPoolsLength() external view returns (uint256) {
         return currentIndividualPools.length;
     }
 
-    /// @return Total undeployed amount aggregated across allIndividualPools
+    /// @return Sum of all dividends returned to this aggregate pool
+    function getCumulativeDividends() public view override returns (uint256) {
+        uint256 totalReturned;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            totalReturned += individualPool.getCumulativeDividends();
+        }
+        return totalReturned;
+    }
+
+    /// @return Sum of all investments deployed aggregated across currentIndividualPools
+    function getTotalDeployedAmount() public view override returns (uint256) {
+        uint256 totalDeployed;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            totalDeployed += individualPool.getTotalDeployedAmount();
+        }
+        return totalDeployed;
+    }
+
+    /// @return Total undeployed amount aggregated across currentIndividualPools
     function getTotalUndeployedAmount() public view override returns (uint256) {
         uint256 totalUndeployedAmount;
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
@@ -522,5 +419,86 @@ contract AggregatePool is BasePool {
             totalUndeployedAmount += individualPool.getTotalUndeployedAmount();
         }
         return totalUndeployedAmount;
+    }
+
+    function getInvestorUndeployedAmount(address investor)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 investorUndeployedAmount;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            investorUndeployedAmount += _multiplyByProRata(
+                individualPool.getTotalUndeployedAmount(),
+                investor
+            );
+        }
+        return investorUndeployedAmount;
+    }
+
+    function getInvestorDeployedAmount(address investor)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 investorDeployedAmount;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            investorDeployedAmount += _multiplyByProRata(
+                individualPool.getTotalDeployedAmount(),
+                investor
+            );
+        }
+        return investorDeployedAmount;
+    }
+
+    function getInvestorUnclaimedDividends(address investor)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 investorUnclaimedDividends;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            investorUnclaimedDividends +=
+                _multiplyByProRata(
+                    individualPool.getCumulativeDividends(),
+                    investor
+                ) -
+                individualPool.getInvestorClaimedDividends(investor);
+        }
+        return investorUnclaimedDividends;
+    }
+
+    /// @return Total dividends claimed by the investor
+    function getInvestorClaimedDividends(address investor)
+        external
+        view
+        override
+        returns (uint256)
+    {
+        uint256 investorClaimedDividends;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            investorClaimedDividends += individualPool
+                .getInvestorClaimedDividends(investor);
+        }
+        return investorClaimedDividends;
+    }
+
+    function _multiplyByProRata(uint256 amount, address investor)
+        internal
+        view
+        returns (uint256)
+    {
+        if (totalSupply() == 0) {
+            return 0;
+        }
+        return (amount * balanceOf(investor)) / totalSupply();
     }
 }
