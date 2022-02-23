@@ -146,6 +146,7 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @notice Returns the absolute difference between a and b
      * @param a Number to subtract
      * @param b Number to subtract
+     * @return the absolute difference between a and b
      */
     function _absoluteDifference(uint256 a, uint256 b)
         private
@@ -268,6 +269,9 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @notice Only callable by an investor
      */
     function claim() external onlyRole(INVESTOR_ROLE) whenNotPaused {
+        uint256 totalShares = totalSupply();
+
+        require(totalShares != 0, "Total shares cannot be 0");
         address claimer = _msgSender();
         uint256 claimerShares = balanceOf(claimer);
 
@@ -275,18 +279,24 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
             address poolAddress = currentIndividualPools[i];
             IndividualPool individualPool = IndividualPool(poolAddress);
 
-            individualPool.claimFromAggregatePool(
-                claimer,
-                claimerShares,
-                totalSupply()
-            );
+            uint256 claimAmount = ((individualPool.cumulativeDividends() *
+                claimerShares) / (totalShares)) -
+                individualPool.claimedDividends(claimer);
+
+            if (
+                claimAmount > 0 &&
+                poolToken.balanceOf(poolAddress) >= claimAmount
+            ) {
+                individualPool.claimFromAggregatePool(claimer, claimAmount);
+            }
         }
     }
 
     /**
-     * @return Amount multiplied by allocation percentage of the individual pool passed in
+     * @notice Amount multiplied by allocation percentage of the individual pool passed in
      * @param individualPool The address of the individual pool's allocation used to calculate pro-rata amount
      * @param amount The amount to be split by pool allocation
+     * @return the amount multiplied by the allocation to the individual pool
      */
     function _multiplyByAllocationPercentage(
         address individualPool,
@@ -378,17 +388,30 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         );
     }
 
-    /// @return Address of the pool manager
+    /**
+     * @notice Gets the address of the pool manager
+     * @return Address of the pool manager
+     */
     function getPoolManager() public view returns (address) {
         return getRoleMember(POOL_MANAGER_ROLE, 0);
     }
 
-    /// @return Length of currentIndividualPools
-    function getCurrentIndividualPoolsLength() external view returns (uint256) {
-        return currentIndividualPools.length;
+    /**
+     * @notice Gets the list of current individual pools in this aggregate pool
+     * @return a list of addresses of current individual pools
+     */
+    function getCurrentIndividualPools()
+        external
+        view
+        returns (address[] memory)
+    {
+        return currentIndividualPools;
     }
 
-    /// @return Sum of all dividends returned to this aggregate pool
+    /**
+     * @notice Gets the sum of all dividends returned to this aggregate pool
+     * @return Sum of all dividends returned to this aggregate pool
+     */
     function getCumulativeDividends() public view override returns (uint256) {
         uint256 totalReturned;
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
@@ -399,7 +422,10 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return totalReturned;
     }
 
-    /// @return Sum of all investments deployed aggregated across currentIndividualPools
+    /**
+     * @notice Gets the sum of all investments deployed aggregated across currentIndividualPools
+     * @return Sum of all investments deployed aggregated across currentIndividualPools
+     */
     function getTotalDeployedAmount() public view override returns (uint256) {
         uint256 totalDeployed;
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
@@ -410,7 +436,10 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return totalDeployed;
     }
 
-    /// @return Total undeployed amount aggregated across currentIndividualPools
+    /**
+     * @notice Gets the total undeployed amount aggregated across currentIndividualPools
+     * @return Total undeployed amount aggregated across currentIndividualPools
+     */
     function getTotalUndeployedAmount() public view override returns (uint256) {
         uint256 totalUndeployedAmount;
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
@@ -421,6 +450,11 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return totalUndeployedAmount;
     }
 
+    /**
+     * @notice Gets the total undeployed amount aggregated across currentIndividualPools for a single investor
+     * @param investor the address of the investor to get the undeployed amount
+     * @return Undeployed amount aggregated across currentIndividualPools for a single investor
+     */
     function getInvestorUndeployedAmount(address investor)
         public
         view
@@ -438,6 +472,11 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return investorUndeployedAmount;
     }
 
+    /**
+     * @notice Gets the total deployed amount aggregated across currentIndividualPools for a single investor
+     * @param investor the address of the investor to get the deployed amount
+     * @return Deployed amount aggregated across currentIndividualPools for a single investor
+     */
     function getInvestorDeployedAmount(address investor)
         public
         view
@@ -455,6 +494,11 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return investorDeployedAmount;
     }
 
+    /**
+     * @notice Gets the total unclaimed dividends aggregated across currentIndividualPools for a single investor
+     * @param investor the address of the investor to get the deployed amount
+     * @return Deployed amount aggregated across currentIndividualPools for a single investor
+     */
     function getInvestorUnclaimedDividends(address investor)
         public
         view
@@ -474,7 +518,11 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return investorUnclaimedDividends;
     }
 
-    /// @return Total dividends claimed by the investor
+    /**
+     * @notice Gets the total claimed dividends aggregated across currentIndividualPools for a single investor
+     * @param investor the address of the investor to get the deployed amount
+     * @return Claimed dividends aggregated across currentIndividualPools for a single investor
+     */
     function getInvestorClaimedDividends(address investor)
         external
         view
@@ -491,6 +539,29 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         return investorClaimedDividends;
     }
 
+    /**
+     * @notice Gets the earliest withdrawal timestamp for the individual pools in the aggregate pool
+     * @return The earliest withdrawal timestamp for the individual pools in the aggregate pool
+     */
+    function getFirstWithdrawalTime() external view override returns (uint256) {
+        uint256 firstWithdrawalTime = 2**256 - 1;
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            IndividualPool individualPool = IndividualPool(poolAddress);
+            if (individualPool.getFirstWithdrawalTime() < firstWithdrawalTime) {
+                firstWithdrawalTime = individualPool.getFirstWithdrawalTime();
+            }
+        }
+        return firstWithdrawalTime;
+    }
+
+    /**
+     * @notice Given an input amount, returns the amount muliplied by an individual
+     *         investor's proportion of ownership in the pool (pro-rated ownership)
+     * @param amount the amount to multiply by the investor's pro-rated token amount
+     * @param investor the address of the investor to get the pro-rated amount for
+     * @return the amount multiplied by the investor's ownership
+     */
     function _multiplyByProRata(uint256 amount, address investor)
         internal
         view

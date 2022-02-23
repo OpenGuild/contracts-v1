@@ -43,6 +43,9 @@ contract IndividualPool is BasePool {
     // investor address => total claimed dividends
     mapping(address => uint256) public claimedDividends;
 
+    // timestamp for first withdrawal in the pool
+    uint256 firstWithdrawalTime;
+
     /**
      * @notice Run only once, on initialization
      * @param _owner The address that is assigned the "OWNER_ROLE" of this contract
@@ -100,6 +103,10 @@ contract IndividualPool is BasePool {
             poolToken.balanceOf(address(this)) >= amount,
             "Contract doesn't have enough pool tokens"
         );
+
+        if (firstWithdrawalTime == 0) {
+            firstWithdrawalTime = block.timestamp;
+        }
 
         totalUndeployed -= amount;
         totalDeployed += amount;
@@ -171,31 +178,25 @@ contract IndividualPool is BasePool {
     /**
      * @notice Sends all claimable dividends to the claimer (msg.sender)
      * @notice Must be called by an aggregate pool
-     * @dev IMPORTANT: CALLER IS RESPONSIBLE FOR VERIFYING THAT `claimer` HAS
-     *      THE CORRECT NUMBER OF `shares` and `totalShares`. Otherwise, this
-     *      individual pool's dividends could be depleted.
+     * @dev IMPORTANT: CALLER IS RESPONSIBLE FOR PASSING IN A CORRECT CLAIM AMOUNT VALUE
+            Otherwise, this individual pool's dividends could be depleted.
      * @param claimer The investor that made the aggregate pool investment
-     * @param shares The number of shares of an aggregate pool held by the claimer
-     * @param totalShares The total number of shares issued by an aggregate pool
+     * @param claimAmount The amount to claim
      */
-    function claimFromAggregatePool(
-        address claimer,
-        uint256 shares,
-        uint256 totalShares
-    ) external onlyValidAggregatePool {
-        require(totalShares != 0, "Total shares cannot be 0");
-        uint256 claimAmount = ((cumulativeDividends * shares) / (totalShares)) -
-            claimedDividends[claimer];
-        if (claimAmount > 0) {
-            require(
-                poolToken.balanceOf(address(this)) >= claimAmount,
-                "Contract does not have enough to return"
-            );
-            claimedDividends[claimer] += claimAmount;
-            emit Claim(claimer, claimAmount);
+    function claimFromAggregatePool(address claimer, uint256 claimAmount)
+        external
+        onlyValidAggregatePool
+    {
+        require(claimAmount > 0, "Cannot claim 0");
 
-            poolToken.safeTransfer(claimer, claimAmount);
-        }
+        require(
+            poolToken.balanceOf(address(this)) >= claimAmount,
+            "Contract does not have enough to return"
+        );
+        claimedDividends[claimer] += claimAmount;
+        emit Claim(claimer, claimAmount);
+
+        poolToken.safeTransfer(claimer, claimAmount);
     }
 
     modifier onlyValidAggregatePool() {
@@ -273,7 +274,10 @@ contract IndividualPool is BasePool {
         return totalUndeployed;
     }
 
-    /// @return Total dividends claimed by the investor
+    /**
+     * @param investor the investor to get the claimed dividends for
+     * @return Total dividends claimed by the investor
+     */
     function getInvestorClaimedDividends(address investor)
         external
         view
@@ -281,6 +285,11 @@ contract IndividualPool is BasePool {
         returns (uint256)
     {
         return claimedDividends[investor];
+    }
+
+    /// @return Timestamp for the first time withdraw() was called in this pool
+    function getFirstWithdrawalTime() external view override returns (uint256) {
+        return firstWithdrawalTime;
     }
 
     /// @return Returns the pro-rated amount

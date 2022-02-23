@@ -5,8 +5,6 @@ import "./external/BaseUpgradeablePausable.sol";
 import "./GovernanceToken.sol";
 
 contract ProtocolConfig is BaseUpgradeablePausable {
-    // OpenGuild's take rate is 5%
-    uint256 public constant PROTOCOL_TAKE_RATE = 500;
     // Set pool manager take rate to 0 in v1
     uint256 public constant POOL_MANAGER_TAKE_RATE = 0;
     uint256 public constant TAKE_RATE_PRECISION = 10000;
@@ -20,15 +18,23 @@ contract ProtocolConfig is BaseUpgradeablePausable {
     // individual pool addresses => individual pool address's validity
     mapping(address => bool) public validIndividualPools;
 
-    // DO NOT CHANGE EXISTING VALUES; APPEND ONLY
+    // OpenGuild's take rate
+    uint256 public takeRate;
+
+    /**
+     * @notice Indices of all addresses in the protocol
+     * @dev DO NOT CHANGE EXISTING VALUES; APPEND ONLY
+     */
     enum Addresses {
         GovernanceToken,
         ProtocolConfig,
         Treasury
     }
 
-    // Type of pool
-    // DO NOT CHANGE EXISTING VALUES; APPEND ONLY
+    /**
+     * @notice Type of the pool
+     * @dev DO NOT CHANGE EXISTING VALUES; APPEND ONLY
+     */
     enum PoolType {
         AggregatePool,
         IndividualPool
@@ -39,20 +45,22 @@ contract ProtocolConfig is BaseUpgradeablePausable {
      * @param _owner The address of who should have the "OWNER_ROLE" of this contract
      * @param _treasury The address of the OpenGuild treasury
      */
-    function initialize(address _owner, address _treasury)
-        external
-        initializer
-    {
+    function initialize(
+        address _owner,
+        address _treasury,
+        uint256 _takeRate
+    ) external initializer {
         require(_owner != address(0), "Owner address cannot be empty");
         require(_treasury != address(0), "Treasury address cannot be empty");
-
+        takeRate = _takeRate;
         __BaseUpgradeablePausable__init(_owner);
         setTreasuryAddress(_treasury);
     }
 
     /**
-     * @return The address at a given index
+     * @notice The address at a given index
      * @param index The index of the address
+     * @return Returns the address at the given index
      */
     function getAddress(uint256 index) public view returns (address) {
         return addresses[index];
@@ -81,7 +89,10 @@ contract ProtocolConfig is BaseUpgradeablePausable {
         addresses[key] = newTreasuryAddress;
     }
 
-    /// @return The protocol's governance token contract
+    /**
+     * @notice Returns the governance token contract
+     * @return The protocol's governance token contract
+     */
     function getGovernanceTokenContract()
         external
         view
@@ -90,7 +101,10 @@ contract ProtocolConfig is BaseUpgradeablePausable {
         return GovernanceToken(getAddress(uint256(Addresses.GovernanceToken)));
     }
 
-    /// @return The OpenGuild treasury address
+    /**
+     * @notice Returns the governance token contract
+     * @return The OpenGuild treasury address
+     */
     function getTreasuryAddress() external view returns (address) {
         return getAddress(uint256(Addresses.Treasury));
     }
@@ -160,16 +174,25 @@ contract ProtocolConfig is BaseUpgradeablePausable {
     }
 
     /**
-     * @return Whether or not the individual pool is valid
+     * @notice Whether or not the individual pool is valid
      * @param pool The individual pool being checked
+     * @return Whether or not the given address is a valid individual pool
      */
     function isValidIndividualPool(address pool) public view returns (bool) {
         return validIndividualPools[pool];
     }
 
+    /**
+     * @notice Set a new take rate
+     * @param newTakeRate New take rate
+     */
+    function setTakeRate(uint256 newTakeRate) external onlyAdmin {
+        takeRate = newTakeRate;
+    }
+
     /// @return The protocol wide take rate
-    function getProtocolTakeRate() external pure returns (uint256) {
-        return PROTOCOL_TAKE_RATE;
+    function getProtocolTakeRate() external view returns (uint256) {
+        return takeRate;
     }
 
     /// @return The protocol wide pool manager take rate

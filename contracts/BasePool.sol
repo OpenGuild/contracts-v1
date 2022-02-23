@@ -73,10 +73,15 @@ abstract contract BasePool is BaseUpgradeablePausable {
         returns (uint256)
     {}
 
+    /// @return First withdrawal timestamp in this pool
+    function getFirstWithdrawalTime() external view virtual returns (uint256) {}
+
     /**
      * @return Tuple of OpenGuild's take + remainder
      * @param amount Amount to subtract the fee from
      * @param takeRate Rate to calculate the fee
+     * @return a tuple where the first value is the fee taken from the amount
+     *         and the second is the remainder (amount without the fee)
      */
     function applyFee(uint256 amount, uint256 takeRate)
         public
