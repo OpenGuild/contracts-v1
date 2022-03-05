@@ -13,8 +13,8 @@ import "./IndividualPool.sol";
   * @title  OpenGuild's Aggregate Pool contract
   * @notice An AggregatePool is a pool where investors can invest cryptocurrency into multiple IndividualPools and 
             claim dividends from each. Whenever users invest into an aggregate pool, they are minted shares (ERC20 tokens).
-  * @dev    1 share = 1 poolToken (ie 1 USDT). Therefore, do not use the aggregate pool's decimal() function in 
-            front-end views- use poolToken.decimal() instead.
+  * @dev    1 share = 1 poolToken (ie 1 USDT). Therefore, do not use the aggregate pool's decimals() function in 
+            front-end views- use poolToken.decimals() instead.
   */
 contract AggregatePool is ERC20Upgradeable, BasePool {
     using SafeERC20Upgradeable for IERC20Upgradeable;
@@ -268,7 +268,12 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @notice Claim all unclaimed dividends from currentIndividualPools
      * @notice Only callable by an investor
      */
-    function claim() external onlyRole(INVESTOR_ROLE) whenNotPaused {
+    function claim() external whenNotPaused {
+        require(
+            getInvestorUnclaimedDividends(msg.sender) > 0,
+            "Nothing to claim"
+        );
+
         uint256 totalShares = totalSupply();
 
         require(totalShares != 0, "Total shares cannot be 0");
@@ -571,5 +576,35 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
             return 0;
         }
         return (amount * balanceOf(investor)) / totalSupply();
+    }
+
+    /**
+     * @notice Transfer claimed dividends to new token owner to prevent them from claiming more than what they're owed
+     * @param from the current owner of the tokens
+     * @param to the new owner of the tokens
+     * @param amount the number of tokens to transfer
+     */
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal override {
+        // No need to transfer balances if we're minting warrant tokens
+        if (from != address(0)) {
+            for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+                address poolAddress = currentIndividualPools[i];
+                IndividualPool individualPool = IndividualPool(poolAddress);
+
+                if (individualPool.claimedDividends(from) > 0) {
+                    uint256 claimedDividendsToTransfer = (individualPool
+                        .claimedDividends(from) * amount) / balanceOf(from);
+                    individualPool.transferClaimedDividendBalance(
+                        from,
+                        to,
+                        claimedDividendsToTransfer
+                    );
+                }
+            }
+        }
     }
 }

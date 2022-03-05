@@ -41,6 +41,9 @@ contract IndividualPool is BasePool {
     uint256 public cumulativeDividends;
 
     // investor address => total claimed dividends
+    // NOTE: INVESTORS WHO HAVE BOUGHT SHARES ON THE SECONDARY MARKET WILL HAVE ENTRIES IN claimedDividends
+    // EVEN IF THEY HADN'T CALLED CLAIMED BEFORE. THIS IS NOT AN ACCURATE MEASURE OF HOW MUCH AN INDIVIDUAL
+    // HAS CLAIMED IN DIVIDENDS
     mapping(address => uint256) public claimedDividends;
 
     // timestamp for first withdrawal in the pool
@@ -302,5 +305,19 @@ contract IndividualPool is BasePool {
         uint256 totalShares
     ) internal pure returns (uint256) {
         return (amount * shares) / totalShares;
+    }
+
+    function transferClaimedDividendBalance(
+        address from,
+        address to,
+        uint256 claimedDividendsToTransfer
+    ) external onlyValidAggregatePool {
+        if (
+            claimedDividends[from] > 0 &&
+            claimedDividendsToTransfer <= claimedDividends[from]
+        ) {
+            claimedDividends[to] += claimedDividendsToTransfer;
+            claimedDividends[from] -= claimedDividendsToTransfer;
+        }
     }
 }
