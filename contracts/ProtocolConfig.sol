@@ -187,6 +187,7 @@ contract ProtocolConfig is BaseUpgradeablePausable {
      * @param newTakeRate New take rate
      */
     function setTakeRate(uint256 newTakeRate) external onlyAdmin {
+        require(10000 >= newTakeRate, "The take rate cannot be above 100%");
         takeRate = newTakeRate;
     }
 

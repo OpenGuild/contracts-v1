@@ -42,7 +42,7 @@ abstract contract BasePool is BaseUpgradeablePausable {
         ProtocolConfig _config,
         IERC20Upgradeable _poolToken,
         ProtocolConfig.PoolType _poolType
-    ) public initializer {
+    ) internal initializer {
         poolToken = _poolToken;
         config = _config;
 
@@ -52,7 +52,7 @@ abstract contract BasePool is BaseUpgradeablePausable {
     }
 
     /// @return The sum of all dividends returned to this pool
-    function getCumulativeDividends() public view virtual returns (uint256) {}
+    function getCumulativeDividends() external view virtual returns (uint256) {}
 
     /// @return Total deployed amount in the pool
     function getTotalDeployedAmount() public view virtual returns (uint256) {}

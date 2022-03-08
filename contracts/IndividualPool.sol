@@ -88,8 +88,9 @@ contract IndividualPool is BasePool {
         external
         onlyRole(RECIPIENT_ROLE)
         whenNotPaused
+        nonReentrant
     {
-        require(amount > 0, "You cannot withdraw 0 SLP");
+        require(amount > 0, "You cannot withdraw 0 pool tokens");
 
         address sender = _msgSender();
         require(
@@ -128,15 +129,16 @@ contract IndividualPool is BasePool {
         onlyRole(RECIPIENT_ROLE)
         whenNotPaused
     {
-        require(amount > 0, "You cannot contribute 0 SLP");
+        require(amount > 0, "You cannot contribute 0 pool tokens");
 
         require(totalDeployed > 0, "There is no deployed capital");
 
+        address sender = _msgSender();
+
         require(
-            poolToken.balanceOf(_msgSender()) >= amount,
+            poolToken.balanceOf(sender) >= amount,
             "You don't have enough pool tokens to contribute the amount passed in"
         );
-        address sender = _msgSender();
 
         (uint256 protocolFee, uint256 netContribution) = applyFee(
             amount,
@@ -151,8 +153,14 @@ contract IndividualPool is BasePool {
             recipientBalance -= amount;
         }
         emit Contribute(sender, amount);
-        poolToken.safeTransferFrom(sender, address(this), amount);
-        poolToken.safeTransfer(config.getTreasuryAddress(), protocolFee);
+
+        if (amount > 0) {
+            poolToken.safeTransferFrom(sender, address(this), amount);
+        }
+
+        if (protocolFee > 0) {
+            poolToken.safeTransfer(config.getTreasuryAddress(), protocolFee);
+        }
     }
 
     /**
@@ -164,18 +172,14 @@ contract IndividualPool is BasePool {
      * @notice Only callable by an aggregate pool
      * @dev The warrant token is issued by the issuing aggregate pool, not this individual pool
      * @param amount The amount to be invested
-     * @param investor The address of the investor from the aggregate pool
      */
-    function investFromAggregatePool(uint256 amount, address investor)
+    function investFromAggregatePool(uint256 amount)
         external
         onlyValidAggregatePool
     {
-        require(
-            poolToken.balanceOf(investor) >= amount,
-            "You don't have enough pool tokens to invest"
-        );
-
         totalUndeployed += amount;
+        address aggregatePool = _msgSender();
+        poolToken.safeTransferFrom(aggregatePool, address(this), amount);
     }
 
     /**
@@ -193,10 +197,16 @@ contract IndividualPool is BasePool {
         require(claimAmount > 0, "Cannot claim 0");
 
         require(
+            totalUnclaimedDividends >= claimAmount,
+            "Not enough unclaimed dividends to return"
+        );
+
+        require(
             poolToken.balanceOf(address(this)) >= claimAmount,
-            "Contract does not have enough to return"
+            "Contract does not have enough pool tokens to return"
         );
         claimedDividends[claimer] += claimAmount;
+        totalUnclaimedDividends -= claimAmount;
         emit Claim(claimer, claimAmount);
 
         poolToken.safeTransfer(claimer, claimAmount);
@@ -212,7 +222,6 @@ contract IndividualPool is BasePool {
 
     /// @return The current withdrawable balance
     function getWithdrawableBalance() public view returns (uint256) {
-        require(recipientMaxBalance > 0, "Recipient max balance not set");
         if (recipientBalance > recipientMaxBalance) {
             return 0;
         }
@@ -255,7 +264,7 @@ contract IndividualPool is BasePool {
      * both aggregate pools who have this pool in their allocation and investors who invest
      * directly into this pool
      */
-    function getCumulativeDividends() public view override returns (uint256) {
+    function getCumulativeDividends() external view override returns (uint256) {
         return cumulativeDividends;
     }
 
@@ -293,18 +302,6 @@ contract IndividualPool is BasePool {
     /// @return Timestamp for the first time withdraw() was called in this pool
     function getFirstWithdrawalTime() external view override returns (uint256) {
         return firstWithdrawalTime;
-    }
-
-    /// @return Returns the pro-rated amount
-    /// @param amount the base amount to pro-rate
-    /// @param shares the number of shares held by the individual investor
-    /// @param totalShares the total number of shares held by all investors
-    function _getProRataForAmount(
-        uint256 amount,
-        uint256 shares,
-        uint256 totalShares
-    ) internal pure returns (uint256) {
-        return (amount * shares) / totalShares;
     }
 
     function transferClaimedDividendBalance(

@@ -61,7 +61,7 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         uint256 _investorInvestmentLimit
     ) external initializer {
         require(
-            _currentIndividualPools.length != 0,
+            _currentIndividualPools.length > 0,
             "There must be at least one individual pool associated"
         );
         require(
@@ -122,19 +122,21 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         investorInvestmentLimit = _investorInvestmentLimit;
         currentIndividualPools = _currentIndividualPools;
 
-        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
-            address pool = currentIndividualPools[i];
-            individualPoolAllocations[pool] = _currentPercentages[i];
-        }
-
-        individualPoolAllocations[currentIndividualPools[0]] += sumDifference;
-
         __BasePool__init(
             _owner,
             _config,
             _poolToken,
             ProtocolConfig.PoolType.AggregatePool
         );
+
+        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
+            address poolAddress = currentIndividualPools[i];
+            individualPoolAllocations[poolAddress] = _currentPercentages[i];
+            poolToken.safeApprove(poolAddress, 2**256 - 1);
+        }
+
+        individualPoolAllocations[currentIndividualPools[0]] += sumDifference;
+
         _setRoleAdmin(INVESTOR_ROLE, OWNER_ROLE);
         _setRoleAdmin(POOL_MANAGER_ROLE, OWNER_ROLE);
         _setupRole(POOL_MANAGER_ROLE, _owner);
@@ -219,11 +221,6 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         onlyRole(INVESTOR_ROLE)
         whenNotPaused
     {
-        require(
-            currentIndividualPools.length > 0,
-            "There are no individual pools associated with this pool"
-        );
-
         require(amount > 0, "You must invest more than 0");
         address investor = _msgSender();
         require(
@@ -257,9 +254,10 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
                 poolAddress,
                 amount
             );
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            individualPool.investFromAggregatePool(poolAmount, investor);
-            poolToken.safeTransfer(poolAddress, poolAmount);
+            if (poolAmount > 0) {
+                IndividualPool individualPool = IndividualPool(poolAddress);
+                individualPool.investFromAggregatePool(poolAmount);
+            }
         }
         emit Invest(investor, amount);
     }
@@ -268,15 +266,16 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @notice Claim all unclaimed dividends from currentIndividualPools
      * @notice Only callable by an investor
      */
-    function claim() external whenNotPaused {
+    function claim() public whenNotPaused nonReentrant {
+        uint256 totalShares = totalSupply();
+
+        require(totalShares != 0, "Total shares cannot be 0");
+
         require(
             getInvestorUnclaimedDividends(msg.sender) > 0,
             "Nothing to claim"
         );
 
-        uint256 totalShares = totalSupply();
-
-        require(totalShares != 0, "Total shares cannot be 0");
         address claimer = _msgSender();
         uint256 claimerShares = balanceOf(claimer);
 
@@ -417,7 +416,7 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @notice Gets the sum of all dividends returned to this aggregate pool
      * @return Sum of all dividends returned to this aggregate pool
      */
-    function getCumulativeDividends() public view override returns (uint256) {
+    function getCumulativeDividends() external view override returns (uint256) {
         uint256 totalReturned;
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
             address poolAddress = currentIndividualPools[i];
@@ -461,7 +460,7 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @return Undeployed amount aggregated across currentIndividualPools for a single investor
      */
     function getInvestorUndeployedAmount(address investor)
-        public
+        external
         view
         returns (uint256)
     {
@@ -483,7 +482,7 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
      * @return Deployed amount aggregated across currentIndividualPools for a single investor
      */
     function getInvestorDeployedAmount(address investor)
-        public
+        external
         view
         returns (uint256)
     {
@@ -591,6 +590,9 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
     ) internal override {
         // No need to transfer balances if we're minting warrant tokens
         if (from != address(0)) {
+            if (getInvestorUnclaimedDividends(from) > 0) {
+                claim();
+            }
             for (uint256 i = 0; i < currentIndividualPools.length; i++) {
                 address poolAddress = currentIndividualPools[i];
                 IndividualPool individualPool = IndividualPool(poolAddress);
