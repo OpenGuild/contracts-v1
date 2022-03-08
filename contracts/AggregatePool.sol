@@ -264,19 +264,21 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
 
     /**
      * @notice Claim all unclaimed dividends from currentIndividualPools
-     * @notice Only callable by an investor
      */
     function claim() public whenNotPaused nonReentrant {
+        _claim(msg.sender);
+    }
+
+    /** @notice Private claim function that takes in the claimer address as a parameter
+        @param  claimer the address of the claimer
+     */
+    function _claim(address claimer) private {
         uint256 totalShares = totalSupply();
 
         require(totalShares != 0, "Total shares cannot be 0");
 
-        require(
-            getInvestorUnclaimedDividends(msg.sender) > 0,
-            "Nothing to claim"
-        );
+        require(getInvestorUnclaimedDividends(claimer) > 0, "Nothing to claim");
 
-        address claimer = _msgSender();
         uint256 claimerShares = balanceOf(claimer);
 
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
@@ -591,7 +593,7 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         // No need to transfer balances if we're minting warrant tokens
         if (from != address(0)) {
             if (getInvestorUnclaimedDividends(from) > 0) {
-                claim();
+                _claim(from);
             }
             for (uint256 i = 0; i < currentIndividualPools.length; i++) {
                 address poolAddress = currentIndividualPools[i];
