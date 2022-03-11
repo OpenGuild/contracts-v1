@@ -62,8 +62,6 @@ contract IndividualPool is BasePool {
         IERC20Upgradeable _poolToken,
         address _recipient
     ) external initializer {
-        require(_recipient != address(0), "Recipient cannot be the 0 address");
-
         // initialize variables
 
         __BasePool__init(
@@ -300,7 +298,7 @@ contract IndividualPool is BasePool {
     }
 
     /// @return Timestamp for the first time withdraw() was called in this pool
-    function getFirstWithdrawalTime() external view override returns (uint256) {
+    function getFirstWithdrawalTime() external view returns (uint256) {
         return firstWithdrawalTime;
     }
 

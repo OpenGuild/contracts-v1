@@ -141,7 +141,10 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         _setRoleAdmin(POOL_MANAGER_ROLE, OWNER_ROLE);
         _setupRole(POOL_MANAGER_ROLE, _owner);
 
-        __ERC20_init_unchained("OpenGuild v1 Aggregate Pool", "ogV1AggPool");
+        __ERC20_init_unchained(
+            "OpenGuild V1 Aggregate Pool 1 Yield Token",
+            "ogV1Agg1"
+        );
     }
 
     /**
@@ -514,12 +517,19 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
         for (uint256 i = 0; i < currentIndividualPools.length; i++) {
             address poolAddress = currentIndividualPools[i];
             IndividualPool individualPool = IndividualPool(poolAddress);
-            investorUnclaimedDividends +=
-                _multiplyByProRata(
-                    individualPool.getCumulativeDividends(),
-                    investor
-                ) -
-                individualPool.getInvestorClaimedDividends(investor);
+
+            uint256 proRataCumulativeDividends = _multiplyByProRata(
+                individualPool.getCumulativeDividends(),
+                investor
+            );
+            uint256 investorClaimedDividends = individualPool
+                .getInvestorClaimedDividends(investor);
+
+            if (proRataCumulativeDividends > investorClaimedDividends) {
+                investorUnclaimedDividends +=
+                    proRataCumulativeDividends -
+                    investorClaimedDividends;
+            }
         }
         return investorUnclaimedDividends;
     }
@@ -543,22 +553,6 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
                 .getInvestorClaimedDividends(investor);
         }
         return investorClaimedDividends;
-    }
-
-    /**
-     * @notice Gets the earliest withdrawal timestamp for the individual pools in the aggregate pool
-     * @return The earliest withdrawal timestamp for the individual pools in the aggregate pool
-     */
-    function getFirstWithdrawalTime() external view override returns (uint256) {
-        uint256 firstWithdrawalTime = 2**256 - 1;
-        for (uint256 i = 0; i < currentIndividualPools.length; i++) {
-            address poolAddress = currentIndividualPools[i];
-            IndividualPool individualPool = IndividualPool(poolAddress);
-            if (individualPool.getFirstWithdrawalTime() < firstWithdrawalTime) {
-                firstWithdrawalTime = individualPool.getFirstWithdrawalTime();
-            }
-        }
-        return firstWithdrawalTime;
     }
 
     /**
@@ -610,5 +604,9 @@ contract AggregatePool is ERC20Upgradeable, BasePool {
                 }
             }
         }
+    }
+
+    function decimals() public view override returns (uint8) {
+        return 6;
     }
 }
